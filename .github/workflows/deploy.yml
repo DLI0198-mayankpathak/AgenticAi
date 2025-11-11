@@ -1,0 +1,41 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install fastapi uvicorn[standard]
+    
+    - name: Create deployment package
+      run: |
+        mkdir -p deployment
+        cp -r src deployment/
+        cp web_api.py deployment/
+        cp requirements.txt deployment/
+        echo "Deployment package created"
+    
+    - name: Deploy notification
+      run: |
+        echo "✅ Agent ready for deployment"
+        echo "To deploy to a cloud service:"
+        echo "1. Azure: Use Azure App Service"
+        echo "2. AWS: Use AWS Lambda or EC2"
+        echo "3. Heroku: Use Heroku CLI"
+        echo "4. Railway: Use Railway.app"
