@@ -1,9 +1,7 @@
 name: Deploy to Railway
 
 on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches: [ main ]
+  workflow_dispatch:  # Manual trigger only - use Railway website for easier deployment
 
 jobs:
   deploy:
@@ -13,10 +11,38 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
     
-    - name: Install Railway CLI
-      run: npm i -g @railway/cli
+    - name: Deployment Instructions
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  🚀 Railway Deployment Instructions"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "To deploy to Railway, use the Railway website (easier):"
+        echo ""
+        echo "1. Go to https://railway.app"
+        echo "2. Click 'New Project' → 'Deploy from GitHub repo'"
+        echo "3. Select: DLI0198-mayankpathak/AgenticAi"
+        echo "4. Railway auto-detects Dockerfile and deploys"
+        echo "5. Add environment variables in Railway dashboard:"
+        echo "   - JIRA_BASE_URL"
+        echo "   - JIRA_USERNAME"
+        echo "   - JIRA_API_TOKEN"
+        echo ""
+        echo "Your API will be live at: https://yourapp.railway.app"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "To use Railway CLI (advanced):"
+        echo "1. Get token from: https://railway.app/account/tokens"
+        echo "2. Add to GitHub Secrets as: RAILWAY_TOKEN"
+        echo "3. Uncomment the deployment step below"
+        echo ""
     
-    - name: Deploy to Railway
-      run: railway up --service jira-agent-api
-      env:
-        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    # Uncomment to use Railway CLI (requires RAILWAY_TOKEN in GitHub Secrets)
+    # - name: Install Railway CLI
+    #   run: npm i -g @railway/cli
+    # 
+    # - name: Deploy to Railway
+    #   run: railway up
+    #   env:
+    #     RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
