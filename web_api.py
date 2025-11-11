@@ -107,6 +107,24 @@ async def health_check():
     """Health check for monitoring"""
     return {"status": "healthy"}
 
-if __name__ == "__main__":
+def start():
+    """Start the API server - can be called from anywhere"""
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("\n" + "="*60)
+    print("  🚀 Starting Jira Analysis Agent API")
+    print("="*60)
+    print("\n📍 API Endpoints:")
+    print("   • Health Check:  http://localhost:8000/")
+    print("   • API Docs:      http://localhost:8000/docs")
+    print("   • Health Status: http://localhost:8000/health")
+    print("   • Analyze Issue: http://localhost:8000/analyze (POST)")
+    print("\n⚡ Server starting on http://localhost:8000")
+    print("📖 Interactive docs available at http://localhost:8000/docs")
+    print("\n✨ Press Ctrl+C to stop the server\n")
+    print("="*60 + "\n")
+    
+    # Use import string for reload to work properly
+    uvicorn.run("web_api:app", host="0.0.0.0", port=8000, reload=True)
+
+if __name__ == "__main__":
+    start()

@@ -4,6 +4,7 @@ echo   Starting Jira Analysis Agent Web API
 echo ================================================
 echo.
 echo API will be available at: http://localhost:8000
+echo API Documentation: http://localhost:8000/docs
 echo.
 echo Endpoints:
 echo   GET  /           - Health check
@@ -14,4 +15,6 @@ echo Press Ctrl+C to stop the server
 echo ================================================
 echo.
 
-D:\DEV\AgenticAi\.venv\Scripts\python.exe -m uvicorn web_api:app --host 0.0.0.0 --port 8000 --reload
+REM Auto-start: Change directory and run the API
+cd /d "%~dp0"
+python web_api.py
