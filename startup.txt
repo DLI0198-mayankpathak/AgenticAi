@@ -1,0 +1,4 @@
+# App Service Startup Configuration
+# Used by Azure App Service for Python deployments
+
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker web_api:app --bind 0.0.0.0:8000
