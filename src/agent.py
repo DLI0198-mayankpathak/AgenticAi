@@ -309,31 +309,68 @@ class JiraAnalysisAgent:
         return "\n".join(output)
     
     def _format_source_for_jira(self, result: AnalysisResult) -> str:
-        """Format source code for Jira field as plain text"""
+        """Format source code for Jira field with structured formatting"""
         source = result.source_code
-        output = [f"💻 Generated Source Code ({source.language.upper()})\n"]
+        output = []
         
-        output.append(f"Generated {len(source.files)} files:\n")
+        # Header with language
+        output.append("=" * 80)
+        output.append(f"💻 GENERATED SOURCE CODE ({source.language.upper()})")
+        output.append("=" * 80)
+        output.append("")
         
-        # Include actual source code for each file
+        # Summary
+        output.append(f"📁 Total Files: {len(source.files)}")
+        output.append(f"🔧 Language: {source.language.upper()}")
+        output.append("")
+        
+        # Dependencies Section
+        if source.dependencies:
+            output.append("-" * 80)
+            output.append("📦 DEPENDENCIES")
+            output.append("-" * 80)
+            for dep in source.dependencies:
+                output.append(f"  • {dep}")
+            output.append("")
+        
+        # Source Files Section
+        output.append("-" * 80)
+        output.append("📂 SOURCE FILES")
+        output.append("-" * 80)
+        output.append("")
+        
         for i, file_info in enumerate(source.files, 1):
             filename = file_info['filename']
             description = file_info.get('description', 'Source file')
             code = file_info['code']
             
-            output.append(f"\n{i}. {filename}")
-            output.append(f"{description}\n")
+            # File header
+            output.append(f"\n{'=' * 80}")
+            output.append(f"FILE #{i}: {filename}")
+            output.append(f"{'=' * 80}")
+            output.append(f"Description: {description}")
+            output.append(f"{'-' * 80}")
+            output.append("")
+            
+            # Code block with proper indentation
+            output.append("{code:java}" if source.language == "java" else "{code:typescript}" if source.language == "angular" else "{code}")
             output.append(code)
+            output.append("{code}")
             output.append("")
         
-        output.append(f"\nDependencies:")
-        for dep in source.dependencies:
-            output.append(f"  - {dep}")
-        
+        # Setup Instructions Section
         if source.setup_instructions:
-            output.append(f"\nSetup Instructions:")
+            output.append("-" * 80)
+            output.append("⚙️ SETUP INSTRUCTIONS")
+            output.append("-" * 80)
             for i, instruction in enumerate(source.setup_instructions, 1):
-                output.append(f"  {i}. {instruction}")
+                output.append(f"{i}. {instruction}")
+            output.append("")
+        
+        # Footer
+        output.append("=" * 80)
+        output.append("✅ END OF SOURCE CODE")
+        output.append("=" * 80)
         
         return "\n".join(output)
     
