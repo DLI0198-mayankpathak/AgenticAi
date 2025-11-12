@@ -24,13 +24,39 @@ GET /health
 POST /analyze
 ```
 
+**Authentication (3 options):**
+
+**Option 1: Request Body**
+```json
+{
+  "issue_id": "DL-123",
+  "language": "BE",
+  "jira_username": "your-email@company.com",
+  "jira_api_token": "your_token"
+}
+```
+
+**Option 2: Bearer Token**
+```bash
+Authorization: Bearer base64(username:api_token)
+```
+
+**Option 3: Environment Variables (.env)**
+No authentication needed - uses .env file
+
 **Request Body:**
 ```json
 {
-  "issue_id": "DL-123",              // Required
-  "language": "BE",                   // Required: "BE" or "UI"
-  "max_hours": 8.0,                   // Optional (default: 4.0)
-  "assign_to": "dev@email.com"        // Optional
+  "issue_id": "DL-123",                    // Required
+  "language": "BE",                         // Required: "BE" or "UI"
+  "max_hours": 8.0,                         // Optional (default: 4.0)
+  "assign_to": "dev@email.com",             // Optional
+  "jira_username": "user@company.com",      // Optional (for auth)
+  "jira_api_token": "your_token",           // Optional (for auth)
+  "repository_name": "my-repo",             // Optional
+  "repository_organization": "my-org",      // Optional
+  "azure_organization": "azure-org",        // Optional
+  "azure_project": "project"                // Optional
 }
 ```
 

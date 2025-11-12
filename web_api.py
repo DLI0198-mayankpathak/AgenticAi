@@ -2,17 +2,22 @@
 FastAPI Web API for Jira Analysis Agent
 Provides REST endpoints to trigger analysis and updates
 """
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
 from src.agent import JiraAnalysisAgent
 from src.config import AgentConfig
+import base64
+import os
 
 app = FastAPI(
     title="Jira Analysis Agent API",
     description="AI-powered Jira issue analysis with code generation and effort estimation",
     version="1.0.0"
 )
+
+security = HTTPBearer()
 
 class AnalysisRequest(BaseModel):
     issue_id: str
@@ -23,6 +28,8 @@ class AnalysisRequest(BaseModel):
     repository_organization: Optional[str] = None
     azure_organization: Optional[str] = None
     azure_project: Optional[str] = None
+    jira_username: Optional[str] = None  # Optional: can use token auth instead
+    jira_api_token: Optional[str] = None  # Optional: can use token auth instead
 
 class AnalysisResponse(BaseModel):
     success: bool
@@ -40,18 +47,65 @@ async def root():
         "version": "1.0.0"
     }
 
+def parse_authorization(authorization: Optional[str] = Header(None)) -> tuple[Optional[str], Optional[str]]:
+    """
+    Parse Authorization header for Jira credentials
+    Supports: Bearer token format "username:api_token" (base64 encoded)
+    """
+    if not authorization:
+        return None, None
+    
+    try:
+        # Remove "Bearer " prefix
+        if authorization.startswith("Bearer "):
+            token = authorization[7:]
+            # Decode base64
+            decoded = base64.b64decode(token).decode('utf-8')
+            # Split username:token
+            if ':' in decoded:
+                username, api_token = decoded.split(':', 1)
+                return username, api_token
+    except Exception:
+        pass
+    
+    return None, None
+
 @app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_issue(request: AnalysisRequest):
+async def analyze_issue(request: AnalysisRequest, authorization: Optional[str] = Header(None)):
     """
     Analyze a Jira issue and update it with pseudo code, source code, and effort estimation
     
+    Authentication:
+    - Option 1: Include jira_username and jira_api_token in request body
+    - Option 2: Use Authorization header: Bearer base64(username:api_token)
+    - Option 3: Falls back to .env file if no credentials provided
+    
     Args:
         request: Analysis request with issue_id and configuration
+        authorization: Optional Authorization header with Jira credentials
         
     Returns:
         AnalysisResponse with success status and details
     """
     try:
+        # Determine Jira credentials (priority: body > header > env)
+        jira_username = request.jira_username
+        jira_api_token = request.jira_api_token
+        
+        # Try to get from Authorization header if not in body
+        if not jira_username or not jira_api_token:
+            header_username, header_token = parse_authorization(authorization)
+            jira_username = jira_username or header_username
+            jira_api_token = jira_api_token or header_token
+        
+        # Override environment variables if credentials provided
+        if jira_username and jira_api_token:
+            os.environ['JIRA_USERNAME'] = jira_username
+            os.environ['JIRA_API_TOKEN'] = jira_api_token
+            print(f"🔐 Using provided Jira credentials for user: {jira_username}")
+        else:
+            print(f"🔐 Using Jira credentials from .env file")
+        
         # Create agent with configuration
         config = AgentConfig(
             language=request.language,  # type: ignore
