@@ -1,15 +1,16 @@
 """
-Agentic AI System for Jira Issue Analysis
+Agentic AI - Minimal Agent Package
 """
-from .agent import JiraAnalysisAgent
-from .config import AgentConfig
-from .models import (
+from .agent import (
+    JiraAnalysisAgent,
+    AgentConfig,
     JiraIssue,
     PseudoCode,
     SourceCode,
     EffortEstimate,
     TaskBreakdown,
-    AnalysisResult
+    AnalysisResult,
+    ComplexityLevel
 )
 
 __version__ = "0.1.0"
@@ -22,5 +23,6 @@ __all__ = [
     "SourceCode",
     "EffortEstimate",
     "TaskBreakdown",
-    "AnalysisResult"
+    "AnalysisResult",
+    "ComplexityLevel"
 ]

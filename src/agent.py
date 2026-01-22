@@ -1,486 +1,524 @@
 """
-Main Agent Module
-Orchestrates the entire workflow from Jira issue fetch to report generation
+Minimal Agentic AI Agent - All-in-one module
+Orchestrates Jira issue analysis, code generation, and effort estimation
 """
-from typing import Optional
-from .config import AgentConfig
-from .models import JiraIssue, AnalysisResult, PseudoCode, SourceCode
-from .mcp_client import MCPJiraClient, MCPBitbucketClient
-from .code_generator import PseudoCodeGenerator, SourceCodeGenerator
-from .effort_estimator import EffortEstimator
-from .formatter import MarkdownFormatter
+import os
+import re
+import requests
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Literal
+from enum import Enum
+from requests.auth import HTTPBasicAuth
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# ============================================================================
+# ENUMS & MODELS
+# ============================================================================
+
+class ComplexityLevel(str, Enum):
+    SIMPLE = "Simple"
+    MODERATE = "Moderate"
+    COMPLEX = "Complex"
+
+@dataclass
+class JiraIssue:
+    issue_id: str
+    title: str
+    description: str
+    issue_type: str
+    priority: str
+    assignee: Optional[str] = None
+    status: str = "Open"
+    labels: List[str] = field(default_factory=list)
+    components: List[str] = field(default_factory=list)
+    raw_data: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class PseudoCode:
+    sections: List[Dict[str, str]]
+    complexity: ComplexityLevel
+    notes: List[str] = field(default_factory=list)
+
+@dataclass
+class SourceCode:
+    language: str
+    files: List[Dict[str, str]]
+    dependencies: List[str] = field(default_factory=list)
+    setup_instructions: List[str] = field(default_factory=list)
+
+@dataclass
+class EffortEstimate:
+    task_name: str
+    complexity: ComplexityLevel
+    estimated_hours: float
+    estimated_days: float
+    risk_factors: List[str] = field(default_factory=list)
+    assumptions: List[str] = field(default_factory=list)
+
+@dataclass
+class TaskBreakdown:
+    tasks: List[EffortEstimate]
+    total_hours: float
+    total_days: float
+    buffer_percentage: float = 20.0
+    
+    @property
+    def total_with_buffer(self) -> float:
+        return self.total_days * (1 + self.buffer_percentage / 100)
+
+@dataclass
+class AnalysisResult:
+    issue: JiraIssue
+    pseudo_code: PseudoCode
+    source_code: SourceCode
+    effort_estimate: TaskBreakdown
+    recommendations: List[str] = field(default_factory=list)
+
+@dataclass
+class AgentConfig:
+    language: Literal["java", "angular", "fullstack", "BE", "UI"] = "java"
+    backend_language: Optional[str] = None
+    frontend_language: Optional[str] = None
+    max_hours: float = 4.0
+    jira_provider: str = "jira"
+    pseudo_code_field: str = "Pseudo Code"
+    source_code_field: str = "Source Code"
+    original_estimate_field: str = ""
+    bitbucket_provider: str = "bitbucket"
+
+# ============================================================================
+# JIRA CLIENT
+# ============================================================================
+
+class MCPJiraClient:
+    def __init__(self, provider: str = "jira"):
+        self.provider = provider
+        self.jira_base_url = os.getenv("JIRA_BASE_URL", "")
+        self.jira_username = os.getenv("JIRA_USERNAME", "")
+        self.jira_api_token = os.getenv("JIRA_API_TOKEN", "")
+        self.use_direct_api = bool(self.jira_base_url and self.jira_username and self.jira_api_token)
+        self._field_id_cache = {}
+        
+        if self.use_direct_api:
+            print(f"🔐 Jira credentials loaded")
+        else:
+            print(f"⚠️  Jira credentials missing")
+
+    def get_issue_detail(self, issue_id: str, **kwargs) -> Dict[str, Any]:
+        if not self.use_direct_api:
+            return {"issue_id": issue_id, "title": "Sample Issue", "description": "Sample description", 
+                    "issue_type": "Task", "priority": "Medium", "status": "Open"}
+        
+        try:
+            url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            response = requests.get(url, auth=auth, headers={"Accept": "application/json"})
+            
+            if response.status_code == 200:
+                data = response.json()
+                fields = data.get("fields", {})
+                description = self._adf_to_text(fields.get("description", ""))
+                
+                return {
+                    "issue_id": issue_id,
+                    "title": fields.get("summary", ""),
+                    "description": description or "No description",
+                    "issue_type": fields.get("issuetype", {}).get("name", "Task"),
+                    "priority": fields.get("priority", {}).get("name", "Medium"),
+                    "status": fields.get("status", {}).get("name", "Open"),
+                    "assignee": fields.get("assignee", {}).get("displayName") if fields.get("assignee") else None,
+                    "labels": fields.get("labels", []),
+                    "components": [c.get("name") for c in fields.get("components", [])],
+                    "raw_data": data
+                }
+            raise ValueError(f"Failed to fetch issue: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            raise
+
+    def parse_issue_response(self, response: Dict[str, Any]) -> JiraIssue:
+        return JiraIssue(**{k: response.get(k, v) for k, v in 
+            [("issue_id", ""), ("title", ""), ("description", ""), ("issue_type", "Task"),
+             ("priority", "Medium"), ("assignee", None), ("status", "Open"), 
+             ("labels", []), ("components", []), ("raw_data", {})]})
+
+    def add_comment(self, issue_id: str, comment: str, **kwargs) -> bool:
+        if not self.use_direct_api:
+            return False
+        try:
+            url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}/comment"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            payload = {"body": self._markdown_to_adf(comment)}
+            response = requests.post(url, json=payload, auth=auth, 
+                headers={"Accept": "application/json", "Content-Type": "application/json"})
+            return response.status_code in [200, 201]
+        except:
+            return False
+
+    def update_issue_field(self, issue_id: str, field_name: str, field_value: str) -> bool:
+        if not self.use_direct_api:
+            return False
+        try:
+            field_id = self._get_field_id(field_name)
+            url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            
+            if field_id == "originalEstimate":
+                payload = {"fields": {"timetracking": {"originalEstimate": f"{int(int(field_value)/3600)}h"}}}
+            elif field_id.startswith("customfield_"):
+                payload = {"fields": {field_id: field_value}}
+            else:
+                payload = {"fields": {field_id: self._markdown_to_adf(field_value)}}
+            
+            response = requests.put(url, json=payload, auth=auth,
+                headers={"Accept": "application/json", "Content-Type": "application/json"})
+            return response.status_code == 204
+        except:
+            return False
+
+    def assign_issue(self, issue_id: str, assignee: str) -> bool:
+        if not self.use_direct_api:
+            return False
+        try:
+            account_id = self._get_account_id(assignee)
+            if not account_id:
+                return False
+            url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}/assignee"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            response = requests.put(url, json={"accountId": account_id}, auth=auth,
+                headers={"Accept": "application/json", "Content-Type": "application/json"})
+            return response.status_code == 204
+        except:
+            return False
+
+    def _get_account_id(self, email: str) -> Optional[str]:
+        try:
+            url = f"{self.jira_base_url}/rest/api/3/user/search"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            response = requests.get(url, params={"query": email}, auth=auth, headers={"Accept": "application/json"})
+            if response.status_code == 200:
+                users = response.json()
+                return users[0].get('accountId') if users else None
+        except:
+            pass
+        return None
+
+    def _get_field_id(self, field_name: str) -> str:
+        if field_name.startswith("customfield_"):
+            return field_name
+        standard = {"description": "description", "originalEstimate": "originalEstimate", "originalestimate": "originalEstimate"}
+        if field_name.lower() in standard:
+            return standard[field_name.lower()]
+        if field_name in self._field_id_cache:
+            return self._field_id_cache[field_name]
+        try:
+            url = f"{self.jira_base_url}/rest/api/3/field"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            response = requests.get(url, auth=auth, headers={"Accept": "application/json"})
+            if response.status_code == 200:
+                for f in response.json():
+                    if f.get("name", "").lower() == field_name.lower():
+                        self._field_id_cache[field_name] = f.get("id")
+                        return f.get("id")
+        except:
+            pass
+        return field_name
+
+    def _adf_to_text(self, adf: Any) -> str:
+        if isinstance(adf, str):
+            return adf
+        if not isinstance(adf, dict):
+            return ""
+        parts = []
+        def extract(node):
+            if isinstance(node, dict):
+                if node.get("type") == "text":
+                    parts.append(node.get("text", ""))
+                for child in node.get("content", []):
+                    extract(child)
+            elif isinstance(node, list):
+                for item in node:
+                    extract(item)
+        extract(adf)
+        return " ".join(parts)
+
+    def _markdown_to_adf(self, text: str) -> Dict:
+        paragraphs = text.split("\n\n") if "\n\n" in text else [text]
+        content = []
+        for para in paragraphs:
+            if para.strip():
+                content.append({"type": "paragraph", "content": [{"type": "text", "text": para.strip()}]})
+        return {"type": "doc", "version": 1, "content": content}
+
+# ============================================================================
+# CODE GENERATORS
+# ============================================================================
+
+class PseudoCodeGenerator:
+    def __init__(self, language: str):
+        self.language = language
+
+    def generate(self, issue: JiraIssue) -> PseudoCode:
+        complexity = self._analyze_complexity(issue)
+        steps = self._generate_steps(issue)
+        return PseudoCode(
+            sections=[{"title": "Implementation Algorithm", "steps": steps}],
+            complexity=complexity,
+            notes=[f"Target: {self.language.upper()}", f"Complexity: {complexity.value}"]
+        )
+
+    def _analyze_complexity(self, issue: JiraIssue) -> ComplexityLevel:
+        desc_len = len(issue.description)
+        issue_type = issue.issue_type.lower()
+        if issue_type in ["bug", "task"] and desc_len < 200:
+            return ComplexityLevel.SIMPLE
+        elif issue_type in ["feature", "story"] or desc_len > 500:
+            return ComplexityLevel.COMPLEX
+        return ComplexityLevel.MODERATE
+
+    def _generate_steps(self, issue: JiraIssue) -> str:
+        desc = issue.description.lower()
+        has_api = any(w in desc for w in ['api', 'endpoint', 'service', 'rest'])
+        has_db = any(w in desc for w in ['database', 'repository', 'store', 'query'])
+        has_validation = any(w in desc for w in ['validate', 'check', 'verify'])
+        
+        steps = ["BEGIN"]
+        if has_validation:
+            steps.extend(["  // Input Validation", "  VALIDATE request parameters", "  IF invalid THEN THROW ValidationException", ""])
+        steps.extend([f"  // Main Logic: {issue.title}", "  PROCESS request data", "  APPLY business rules"])
+        if has_db:
+            steps.append("  EXECUTE database operation")
+        if has_api:
+            steps.append("  CALL external API if needed")
+        steps.extend(["", "  // Response", "  CREATE response", "  RETURN result", "END"])
+        return "\n".join(steps)
+
+
+class SourceCodeGenerator:
+    def __init__(self, language: str):
+        self.language = language
+
+    def generate(self, issue: JiraIssue, pseudo_code: PseudoCode) -> SourceCode:
+        class_name = self._to_class_name(issue.title)
+        if self.language == "java":
+            return self._java_code(class_name)
+        return self._angular_code(class_name)
+
+    def _to_class_name(self, title: str) -> str:
+        skip = {'a','an','the','is','are','to','of','for','with','write','create','update','delete','new','this','that'}
+        words = [w.capitalize() for w in re.sub(r'[^a-zA-Z0-9\s]', '', title).split() 
+                 if w.lower() not in skip and len(w) > 2][:3]
+        return "".join(words) or "Default"
+
+    def _java_code(self, name: str) -> SourceCode:
+        ctrl = f'''@RestController
+@RequestMapping("/api/{name.lower()}")
+@RequiredArgsConstructor
+public class {name}Controller {{
+    private final {name}Service service;
+    
+    @PostMapping
+    public ResponseEntity<?> create(@Valid @RequestBody RequestDTO dto) {{
+        return ResponseEntity.ok(service.create(dto));
+    }}
+    
+    @GetMapping("/{{id}}")
+    public ResponseEntity<?> getById(@PathVariable Long id) {{
+        return ResponseEntity.ok(service.findById(id));
+    }}
+}}'''
+        svc = f'''@Service
+@RequiredArgsConstructor
+public class {name}Service {{
+    private final {name}Repository repository;
+    
+    @Transactional
+    public ResponseDTO create(RequestDTO dto) {{
+        validateBusinessRules(dto);
+        Entity entity = mapToEntity(dto);
+        return mapToResponse(repository.save(entity));
+    }}
+    
+    public ResponseDTO findById(Long id) {{
+        return repository.findById(id)
+            .map(this::mapToResponse)
+            .orElseThrow(() -> new NotFoundException("Not found: " + id));
+    }}
+}}'''
+        return SourceCode("java", [
+            {"filename": f"{name}Controller.java", "code": ctrl, "description": "REST Controller"},
+            {"filename": f"{name}Service.java", "code": svc, "description": "Service Layer"}
+        ], ["spring-boot-starter-web", "spring-boot-starter-data-jpa", "lombok"],
+           ["Add dependencies to pom.xml", "Configure application.properties", "Run: mvn spring-boot:run"])
+
+    def _angular_code(self, name: str) -> SourceCode:
+        kebab = re.sub(r'([a-z])([A-Z])', r'\1-\2', name).lower()
+        comp = f'''@Component({{
+  selector: 'app-{kebab}',
+  templateUrl: './{kebab}.component.html'
+}})
+export class {name}Component implements OnInit {{
+  data: any[] = [];
+  loading = false;
+  
+  constructor(private service: {name}Service) {{}}
+  
+  ngOnInit(): void {{ this.loadData(); }}
+  
+  loadData(): void {{
+    this.loading = true;
+    this.service.getData().subscribe({{
+      next: (r) => {{ this.data = r; this.loading = false; }},
+      error: (e) => {{ console.error(e); this.loading = false; }}
+    }});
+  }}
+}}'''
+        svc = f'''@Injectable({{ providedIn: 'root' }})
+export class {name}Service {{
+  private apiUrl = '/api/{kebab}';
+  
+  constructor(private http: HttpClient) {{}}
+  
+  getData(): Observable<any[]> {{
+    return this.http.get<any[]>(this.apiUrl).pipe(catchError(this.handleError));
+  }}
+  
+  create(data: any): Observable<any> {{
+    return this.http.post<any>(this.apiUrl, data).pipe(catchError(this.handleError));
+  }}
+  
+  private handleError(error: any): Observable<never> {{
+    return throwError(() => error);
+  }}
+}}'''
+        return SourceCode("angular", [
+            {"filename": f"{kebab}.component.ts", "code": comp, "description": "Component"},
+            {"filename": f"{kebab}.service.ts", "code": svc, "description": "Service"}
+        ], ["@angular/core", "@angular/common", "rxjs"],
+           ["Run: npm install", "Import in module", "Run: ng serve"])
+
+# ============================================================================
+# EFFORT ESTIMATOR
+# ============================================================================
+
+class EffortEstimator:
+    BASE_HOURS = {
+        ComplexityLevel.SIMPLE: {"design": 1, "implementation": 2, "testing": 1, "review": 0.5},
+        ComplexityLevel.MODERATE: {"design": 2, "implementation": 4, "testing": 2, "review": 1},
+        ComplexityLevel.COMPLEX: {"design": 4, "implementation": 8, "testing": 4, "review": 2}
+    }
+
+    def __init__(self, max_hours: float = 4.0, hours_per_day: float = 8.0):
+        self.max_hours = max_hours
+        self.hours_per_day = hours_per_day
+
+    def estimate(self, issue: JiraIssue, pseudo_code: PseudoCode, language: str) -> TaskBreakdown:
+        base = self.BASE_HOURS[pseudo_code.complexity]
+        tasks = [
+            EffortEstimate(f"Design - {issue.title[:30]}", pseudo_code.complexity, base["design"], base["design"]/self.hours_per_day),
+            EffortEstimate(f"Implementation ({language})", pseudo_code.complexity, base["implementation"], base["implementation"]/self.hours_per_day),
+            EffortEstimate("Testing", pseudo_code.complexity, base["testing"], base["testing"]/self.hours_per_day),
+            EffortEstimate("Code Review", pseudo_code.complexity, base["review"], base["review"]/self.hours_per_day)
+        ]
+        total_hours = sum(t.estimated_hours for t in tasks)
+        if total_hours > self.max_hours:
+            scale = self.max_hours / total_hours
+            tasks = [EffortEstimate(t.task_name, t.complexity, round(t.estimated_hours*scale, 2), 
+                     round(t.estimated_hours*scale/self.hours_per_day, 2)) for t in tasks]
+            total_hours = self.max_hours
+        return TaskBreakdown(tasks, round(total_hours, 2), round(total_hours/self.hours_per_day, 2))
+
+# ============================================================================
+# FORMATTER
+# ============================================================================
+
+class MarkdownFormatter:
+    def format(self, result: AnalysisResult) -> str:
+        issue = result.issue
+        pseudo = result.pseudo_code
+        source = result.source_code
+        effort = result.effort_estimate
+        
+        sections = [
+            f"# {issue.issue_id}: {issue.title}\n\n---",
+            f"## Issue Details\n| Field | Value |\n|-------|-------|\n| Type | {issue.issue_type} |\n| Priority | {issue.priority} |\n| Status | {issue.status} |\n\n### Description\n{issue.description}",
+            f"## Pseudo Code\n**Complexity:** `{pseudo.complexity.value}`\n\n```\n{pseudo.sections[0]['steps']}\n```",
+            f"## Source Code ({source.language.upper()})\n" + "\n\n".join([f"### {f['filename']}\n```\n{f['code']}\n```" for f in source.files]),
+            "## Effort Estimation\n| Task | Hours | Days |\n|------|-------|------|\n" + "\n".join([f"| {t.task_name} | {t.estimated_hours} | {t.estimated_days:.2f} |" for t in effort.tasks]) + f"\n| **Total** | **{effort.total_hours}** | **{effort.total_days:.2f}** |\n| **With Buffer** | **{effort.total_hours*1.2:.2f}** | **{effort.total_with_buffer:.2f}** |",
+            f"---\n_Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}_"
+        ]
+        return "\n\n".join(sections)
+
+# ============================================================================
+# MAIN AGENT
+# ============================================================================
 
 class JiraAnalysisAgent:
-    """Main agent that orchestrates the analysis workflow"""
-    
     def __init__(self, config: AgentConfig):
         self.config = config
+        lang = {"BE": "java", "UI": "angular"}.get(config.language, config.language)
+        self.is_fullstack = lang == "fullstack"
+        self.backend_lang = config.backend_language or "java" if self.is_fullstack or lang == "java" else None
+        self.frontend_lang = config.frontend_language or "angular" if self.is_fullstack or lang == "angular" else None
         
-        # Map BE/UI to actual languages
-        language = config.language
-        if language == "BE":
-            actual_language = "java"
-        elif language == "UI":
-            actual_language = "angular"
-        else:
-            actual_language = language
+        self.jira_client = MCPJiraClient(config.jira_provider)
+        self.effort_estimator = EffortEstimator(config.max_hours)
+        self.formatter = MarkdownFormatter()
+
+    def analyze_issue(self, issue_id: str, **kwargs) -> AnalysisResult:
+        print(f"📥 Fetching: {issue_id}")
+        issue = self.jira_client.parse_issue_response(self.jira_client.get_issue_detail(issue_id, **kwargs))
+        print(f"✅ {issue.title}")
+
+        lang = self.backend_lang or self.frontend_lang or "java"
+        print(f"🔍 Generating pseudo code ({lang})")
+        pseudo = PseudoCodeGenerator(lang).generate(issue)
         
-        # Determine actual languages to use
-        if actual_language == "fullstack":
-            self.backend_lang = config.backend_language or "java"
-            self.frontend_lang = config.frontend_language or "angular"
-            self.is_fullstack = True
-        else:
-            self.backend_lang = actual_language if actual_language == "java" else None
-            self.frontend_lang = actual_language if actual_language == "angular" else None
-            self.is_fullstack = False
+        print(f"💻 Generating source code")
+        source = SourceCodeGenerator(lang).generate(issue, pseudo)
         
-        self.jira_client = MCPJiraClient(provider=config.jira_provider)
-        self.bitbucket_client = MCPBitbucketClient(provider=config.bitbucket_provider)
-        self.effort_estimator = EffortEstimator(max_hours=config.max_hours)
-        self.markdown_formatter = MarkdownFormatter()
-    
-    def analyze_issue(
-        self,
-        issue_id: str,
-        repository_name: Optional[str] = None,
-        repository_organization: Optional[str] = None,
-        azure_organization: Optional[str] = None,
-        azure_project: Optional[str] = None
-    ) -> AnalysisResult:
-        """
-        Main workflow to analyze a Jira issue
-        
-        Args:
-            issue_id: Jira issue ID (e.g., "DL-123")
-            repository_name: Optional repository name for Bitbucket
-            repository_organization: Optional organization name
-            azure_organization: Optional Azure DevOps organization
-            azure_project: Optional Azure DevOps project
-            
-        Returns:
-            AnalysisResult containing all generated artifacts
-        """
-        
-        # Step 1: Fetch Jira Issue
-        print(f"📥 Fetching Jira issue: {issue_id}")
-        issue_data = self.jira_client.get_issue_detail(
-            issue_id=issue_id,
-            repository_name=repository_name,
-            repository_organization=repository_organization,
-            azure_organization=azure_organization,
-            azure_project=azure_project
-        )
-        issue = self.jira_client.parse_issue_response(issue_data)
-        print(f"✅ Issue fetched: {issue.title}")
-        
-        # Step 2: Generate Pseudo Code
-        be_pseudo_code = None  # Initialize for fullstack
-        fe_pseudo_code = None  # Initialize for fullstack
-        
-        if self.is_fullstack:
-            backend_lang = self.backend_lang or "java"
-            frontend_lang = self.frontend_lang or "angular"
-            print(f"🔍 Generating pseudo code for FULLSTACK (BE: {backend_lang.upper()}, FE: {frontend_lang.upper()})")
-            # Generate for both backend and frontend
-            be_pseudo_generator = PseudoCodeGenerator(language=backend_lang)
-            fe_pseudo_generator = PseudoCodeGenerator(language=frontend_lang)
-            
-            be_pseudo_code = be_pseudo_generator.generate(issue)
-            fe_pseudo_code = fe_pseudo_generator.generate(issue)
-            
-            # Combine pseudo codes
-            combined_sections = [
-                {"title": f"Backend Implementation ({backend_lang.upper()})", "steps": be_pseudo_code.sections[0]['steps']},
-                {"title": f"Frontend Implementation ({frontend_lang.upper()})", "steps": fe_pseudo_code.sections[0]['steps']}
-            ]
-            pseudo_code = PseudoCode(
-                sections=combined_sections,
-                complexity=be_pseudo_code.complexity,  # Use backend complexity as primary
-                notes=be_pseudo_code.notes + fe_pseudo_code.notes
-            )
-            print(f"✅ Pseudo code generated for both BE and FE (Complexity: {pseudo_code.complexity.value})")
-        else:
-            lang = self.backend_lang or self.frontend_lang or "java"
-            print(f"🔍 Generating pseudo code for {lang.upper()}")
-            pseudo_generator = PseudoCodeGenerator(language=lang)
-            pseudo_code = pseudo_generator.generate(issue)
-            print(f"✅ Pseudo code generated (Complexity: {pseudo_code.complexity.value})")
-        
-        # Step 3: Generate Source Code
-        if self.is_fullstack:
-            backend_lang = self.backend_lang or "java"
-            frontend_lang = self.frontend_lang or "angular"
-            print(f"💻 Generating source code for FULLSTACK")
-            be_source_generator = SourceCodeGenerator(language=backend_lang)
-            fe_source_generator = SourceCodeGenerator(language=frontend_lang)
-            
-            # Ensure pseudo codes are available
-            if be_pseudo_code and fe_pseudo_code:
-                be_source = be_source_generator.generate(issue, be_pseudo_code)
-                fe_source = fe_source_generator.generate(issue, fe_pseudo_code)
-            else:
-                raise ValueError("Pseudo codes not generated for fullstack")
-            
-            # Combine source codes
-            combined_files = []
-            combined_files.extend([{**f, "type": "backend"} for f in be_source.files])
-            combined_files.extend([{**f, "type": "frontend"} for f in fe_source.files])
-            
-            source_code = SourceCode(
-                language="fullstack",
-                files=combined_files,
-                dependencies=be_source.dependencies + fe_source.dependencies,
-                setup_instructions=be_source.setup_instructions + ["---"] + fe_source.setup_instructions
-            )
-            print(f"✅ Generated {len(be_source.files)} BE + {len(fe_source.files)} FE files")
-        else:
-            print(f"💻 Generating source code")
-            lang = self.backend_lang or self.frontend_lang or "java"
-            source_generator = SourceCodeGenerator(language=lang)
-            source_code = source_generator.generate(issue, pseudo_code)
-            print(f"✅ Generated {len(source_code.files)} source files")
-        
-        # Step 4: Estimate Effort
-        print(f"📊 Calculating effort estimation")
-        lang = "fullstack" if self.is_fullstack else (self.backend_lang or self.frontend_lang or "java")
-        effort_estimate = self.effort_estimator.estimate(issue, pseudo_code, lang)
-        print(f"✅ Estimated: {effort_estimate.total_days} days (without buffer)")
-        
-        # Step 5: Generate Recommendations
-        recommendations = self._generate_recommendations(
-            issue, 
-            pseudo_code, 
-            source_code, 
-            effort_estimate
-        )
-        
-        return AnalysisResult(
-            issue=issue,
-            pseudo_code=pseudo_code,
-            source_code=source_code,
-            effort_estimate=effort_estimate,
-            recommendations=recommendations
-        )
-    
-    def generate_report(
-        self,
-        result: AnalysisResult,
-        output_filename: Optional[str] = None
-    ) -> str:
-        """
-        Generate markdown report from analysis result
-        
-        Args:
-            result: Analysis result to format
-            output_filename: Optional filename (deprecated, kept for compatibility)
-            
-        Returns:
-            Markdown formatted report as string
-        """
-        
-        print(f"📝 Generating markdown report")
-        markdown_report = self.markdown_formatter.format(result)
-        
-        return markdown_report
-    
-    def update_jira_with_analysis(
-        self,
-        result: AnalysisResult,
-        repository_name: Optional[str] = None,
-        repository_organization: Optional[str] = None,
-        azure_organization: Optional[str] = None,
-        azure_project: Optional[str] = None,
-        assign_to: Optional[str] = None
-    ) -> bool:
-        """
-        Update Jira issue with pseudo code, source code, and effort estimation
-        
-        Args:
-            result: Analysis result to post to Jira
-            repository_name: Optional repository name
-            repository_organization: Optional organization name
-            azure_organization: Optional Azure DevOps organization
-            azure_project: Optional Azure DevOps project
-            assign_to: Optional developer email or name to assign issue to
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Format pseudo code for Jira field
-            pseudo_section = self._format_pseudo_for_jira(result)
-            
-            # Update Pseudo Code field (not description)
-            print(f"📝 Updating 'Pseudo Code' field in issue: {result.issue.issue_id}")
-            
-            pseudo_code_success = self.jira_client.update_issue_field(
-                issue_id=result.issue.issue_id,
-                field_name=self.config.pseudo_code_field,  # Use configured field name
-                field_value=pseudo_section
-            )
-            
-            if pseudo_code_success:
-                print(f"✅ Successfully updated 'Pseudo Code' field")
-            
-            # Update Source Code field if configured
-            source_code_success = True
-            if self.config.source_code_field:
-                source_section = self._format_source_for_jira(result)
-                print(f"📝 Updating 'Source Code' field in issue: {result.issue.issue_id}")
-                
-                source_code_success = self.jira_client.update_issue_field(
-                    issue_id=result.issue.issue_id,
-                    field_name=self.config.source_code_field,
-                    field_value=source_section
-                )
-                
-                if source_code_success:
-                    print(f"✅ Successfully updated 'Source Code' field")
-            
-            # Update Original Estimate field (optional)
-            estimate_success = True
-            if self.config.original_estimate_field:
-                # Average of total_hours and total_hours_with_buffer
-                total_hours = result.effort_estimate.total_hours
-                total_hours_with_buffer = total_hours * (1 + result.effort_estimate.buffer_percentage / 100)
-                avg_hours = (total_hours + total_hours_with_buffer) / 2
-                avg_seconds = int(avg_hours * 3600)  # Convert to seconds for Jira
-                
-                print(f"⏱️  Updating 'Original Estimate' field: {avg_hours:.2f} hours")
-                estimate_success = self.jira_client.update_issue_field(
-                    issue_id=result.issue.issue_id,
-                    field_name=self.config.original_estimate_field,
-                    field_value=str(avg_seconds)
-                )
-                
-                if estimate_success:
-                    print(f"✅ Successfully updated 'Original Estimate' to {avg_hours:.2f} hours")
-            
-            # Format effort estimation for Jira comment
-            effort_section = self._format_effort_for_jira(result)
-            
-            # Post comment to Jira issue (only effort estimate table)
-            print(f"📤 Posting effort estimate to Jira comment: {result.issue.issue_id}")
-            comment_success = self.jira_client.add_comment(
-                issue_id=result.issue.issue_id,
-                comment=effort_section,
-                repository_name=repository_name,
-                repository_organization=repository_organization,
-                azure_organization=azure_organization,
-                azure_project=azure_project
-            )
-            
-            if comment_success:
-                print(f"✅ Successfully posted effort estimate comment")
-            
-            # Assign issue if developer name provided
-            if assign_to:
-                print(f"👤 Assigning issue to: {assign_to}")
-                assign_success = self.jira_client.assign_issue(
-                    issue_id=result.issue.issue_id,
-                    assignee=assign_to
-                )
-                if assign_success:
-                    print(f"✅ Successfully assigned issue to {assign_to}")
-                    # Update the issue object with the new assignee
-                    result.issue.assignee = assign_to
-                    return pseudo_code_success and source_code_success and estimate_success and comment_success and assign_success
-                else:
-                    print(f"⚠️  Updates posted but assignment failed")
-                    return pseudo_code_success and source_code_success and estimate_success and comment_success
-            
-            return pseudo_code_success and source_code_success and estimate_success and comment_success
-            
-        except Exception as e:
-            print(f"❌ Failed to update Jira: {e}")
-            return False
-    
-    def _format_pseudo_for_jira(self, result: AnalysisResult) -> str:
-        """Format pseudo code section for Jira field as plain text"""
-        pseudo = result.pseudo_code
-        output = [f"🔍 Pseudo Code (Complexity: {pseudo.complexity.value})\n"]
-        
-        for section in pseudo.sections:
-            # Just add the pseudo code steps directly, no formatting
-            output.append(section['steps'])
-        
-        return "\n".join(output)
-    
-    def _format_source_for_jira(self, result: AnalysisResult) -> str:
-        """Format source code for Jira field with structured formatting"""
-        source = result.source_code
-        output = []
-        
-        # Header with language
-        output.append("=" * 80)
-        output.append(f"💻 GENERATED SOURCE CODE ({source.language.upper()})")
-        output.append("=" * 80)
-        output.append("")
-        
-        # Summary
-        output.append(f"📁 Total Files: {len(source.files)}")
-        output.append(f"🔧 Language: {source.language.upper()}")
-        output.append("")
-        
-        # Dependencies Section
-        if source.dependencies:
-            output.append("-" * 80)
-            output.append("📦 DEPENDENCIES")
-            output.append("-" * 80)
-            for dep in source.dependencies:
-                output.append(f"  • {dep}")
-            output.append("")
-        
-        # Source Files Section
-        output.append("-" * 80)
-        output.append("📂 SOURCE FILES")
-        output.append("-" * 80)
-        output.append("")
-        
-        for i, file_info in enumerate(source.files, 1):
-            filename = file_info['filename']
-            description = file_info.get('description', 'Source file')
-            code = file_info['code']
-            
-            # File header
-            output.append(f"\n{'=' * 80}")
-            output.append(f"FILE #{i}: {filename}")
-            output.append(f"{'=' * 80}")
-            output.append(f"Description: {description}")
-            output.append(f"{'-' * 80}")
-            output.append("")
-            
-            # Code block with proper indentation
-            output.append("{code:java}" if source.language == "java" else "{code:typescript}" if source.language == "angular" else "{code}")
-            output.append(code)
-            output.append("{code}")
-            output.append("")
-        
-        # Setup Instructions Section
-        if source.setup_instructions:
-            output.append("-" * 80)
-            output.append("⚙️ SETUP INSTRUCTIONS")
-            output.append("-" * 80)
-            for i, instruction in enumerate(source.setup_instructions, 1):
-                output.append(f"{i}. {instruction}")
-            output.append("")
-        
-        # Footer
-        output.append("=" * 80)
-        output.append("✅ END OF SOURCE CODE")
-        output.append("=" * 80)
-        
-        return "\n".join(output)
-    
-    def _format_effort_for_jira(self, result: AnalysisResult) -> str:
-        """Format effort estimation for Jira comment as table"""
-        breakdown = result.effort_estimate
-        output = ["📊 Effort Estimation\n"]
-        
-        output.append("| Task | Hours | Days | Complexity |")
-        output.append("|------|-------|------|------------|")
-        
-        for task in breakdown.tasks:
-            output.append(
-                f"| {task.task_name} | {task.estimated_hours:.2f} | "
-                f"{task.estimated_days:.2f} | {task.complexity.value} |"
-            )
-        
-        output.append(f"| TOTAL | {breakdown.total_hours:.2f} | {breakdown.total_days:.2f} | |")
-        output.append(
-            f"| WITH BUFFER ({breakdown.buffer_percentage}%) | "
-            f"{breakdown.total_hours * (1 + breakdown.buffer_percentage/100):.2f} | "
-            f"{breakdown.total_with_buffer:.2f} | |"
-        )
-        
-        return "\n".join(output)
-    
-    
-    
-    def _generate_recommendations(
-        self,
-        issue: JiraIssue,
-        pseudo_code,
-        source_code,
-        effort_estimate
-    ) -> list:
-        """Generate recommendations based on analysis"""
+        print(f"📊 Estimating effort")
+        effort = self.effort_estimator.estimate(issue, pseudo, lang)
         
         recommendations = []
+        if pseudo.complexity == ComplexityLevel.COMPLEX:
+            recommendations.append("Consider breaking into smaller tasks")
+        if effort.total_with_buffer > self.config.max_hours / 8:
+            recommendations.append(f"Effort exceeds {self.config.max_hours}h limit")
         
-        # Complexity-based recommendations
-        if pseudo_code.complexity.value == "Complex":
-            recommendations.append(
-                "Consider breaking this task into smaller sub-tasks for better manageability"
-            )
-            recommendations.append(
-                "Schedule a technical design review before implementation"
-            )
-        
-        # Effort-based recommendations
-        max_days = self.config.max_hours / 8.0  # Convert hours to days
-        if effort_estimate.total_with_buffer > max_days:
-            recommendations.append(
-                f"Estimated effort ({effort_estimate.total_with_buffer:.1f} days / {effort_estimate.total_hours * 1.2:.1f} hours) exceeds "
-                f"max hours ({self.config.max_hours}h / {max_days:.1f} days). Consider scope reduction or timeline adjustment."
-            )
-        
-        # Language-specific recommendations
-        if self.config.language == "java":
-            recommendations.append(
-                "Ensure proper exception handling and logging throughout the implementation"
-            )
-            recommendations.append(
-                "Write comprehensive unit tests using JUnit and Mockito"
-            )
-        elif self.config.language == "angular":
-            recommendations.append(
-                "Follow Angular style guide and use reactive forms for complex scenarios"
-            )
-            recommendations.append(
-                "Implement proper error handling and loading states in the UI"
-            )
-        
-        # Priority-based recommendations
-        if issue.priority in ["Critical", "High"]:
-            recommendations.append(
-                "Given the high priority, consider pair programming or code review during development"
-            )
-        
-        return recommendations
+        return AnalysisResult(issue, pseudo, source, effort, recommendations)
+
+    def generate_report(self, result: AnalysisResult, **kwargs) -> str:
+        return self.formatter.format(result)
+
+    def update_jira_with_analysis(self, result: AnalysisResult, assign_to: Optional[str] = None, **kwargs) -> bool:
+        try:
+            pseudo_text = f"🔍 Pseudo Code ({result.pseudo_code.complexity.value})\n\n{result.pseudo_code.sections[0]['steps']}"
+            self.jira_client.update_issue_field(result.issue.issue_id, self.config.pseudo_code_field, pseudo_text)
+            
+            effort_text = "📊 Effort Estimation\n\n| Task | Hours | Days |\n|------|-------|------|\n" + \
+                "\n".join([f"| {t.task_name} | {t.estimated_hours} | {t.estimated_days:.2f} |" for t in result.effort_estimate.tasks]) + \
+                f"\n| **Total** | {result.effort_estimate.total_hours} | {result.effort_estimate.total_days:.2f} |"
+            self.jira_client.add_comment(result.issue.issue_id, effort_text, **kwargs)
+            
+            if assign_to:
+                self.jira_client.assign_issue(result.issue.issue_id, assign_to)
+            
+            print(f"✅ Jira updated: {result.issue.issue_id}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed: {e}")
+            return False
 
 
 def main():
-    """Example usage of the agent"""
-    
-    # Configure the agent
-    config = AgentConfig(
-        language="java",  # or "angular"
-        max_hours=4.0  # Maximum 4 hours
-    )
-    
-    # Create agent
+    config = AgentConfig(language="java", max_hours=4.0)
     agent = JiraAnalysisAgent(config)
-    
-    # Analyze a Jira issue
-    # In real usage with MCP, you would provide actual issue ID
-    result = agent.analyze_issue(
-        issue_id="DL-123",
-        repository_name="my-repo",
-        repository_organization="my-org"
-    )
-    
-    # Print effort table
-    
-    # Generate and save report
-    report = agent.generate_report(
-        result,
-        output_filename=f"{result.issue.issue_id}_analysis.md"
-    )
-    
-    print("\n✅ Analysis complete!")
+    result = agent.analyze_issue("DL-123")
+    print(agent.generate_report(result))
 
 
 if __name__ == "__main__":

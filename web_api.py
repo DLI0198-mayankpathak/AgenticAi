@@ -28,6 +28,7 @@ class AnalysisRequest(BaseModel):
     repository_organization: Optional[str] = None
     azure_organization: Optional[str] = None
     azure_project: Optional[str] = None
+    jira_base_url: Optional[str] = None  # Optional: override base URL
     jira_username: Optional[str] = None  # Optional: can use token auth instead
     jira_api_token: Optional[str] = None  # Optional: can use token auth instead
 
@@ -105,6 +106,11 @@ async def analyze_issue(request: AnalysisRequest, authorization: Optional[str] =
             print(f"🔐 Using provided Jira credentials for user: {jira_username}")
         else:
             print(f"🔐 Using Jira credentials from .env file")
+
+        # Override base URL if provided
+        if request.jira_base_url:
+            os.environ['JIRA_BASE_URL'] = request.jira_base_url
+            print(f"🔗 Using provided Jira base URL: {request.jira_base_url}")
         
         # Create agent with configuration
         config = AgentConfig(
@@ -149,7 +155,13 @@ async def analyze_issue(request: AnalysisRequest, authorization: Optional[str] =
                 detail="Failed to update Jira issue"
             )
             
+    except ValueError as e:
+        # Propagate known validation issues (e.g., Jira returns 404)
+        message = str(e)
+        print(f"❌ Error: {message}")
+        raise HTTPException(status_code=404, detail=message)
     except Exception as e:
+        # Unknown/unhandled errors
         print(f"❌ Error: {str(e)}")
         raise HTTPException(
             status_code=500,
