@@ -6,8 +6,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import Optional
-from src.agent import JiraAnalysisAgent
-from src.config import AgentConfig
+from src.agent import JiraAnalysisAgent, AgentConfig
 import base64
 import os
 

@@ -160,23 +160,66 @@ class MCPJiraClient:
 
     def update_issue_field(self, issue_id: str, field_name: str, field_value: str) -> bool:
         if not self.use_direct_api:
+            print(f"   ⚠️ No Jira credentials - cannot update {field_name}")
             return False
         try:
             field_id = self._get_field_id(field_name)
+            print(f"   📝 Updating '{field_name}' → {field_id}")
             url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}"
             auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
             
             if field_id == "originalEstimate":
                 payload = {"fields": {"timetracking": {"originalEstimate": f"{int(int(field_value)/3600)}h"}}}
             elif field_id.startswith("customfield_"):
-                payload = {"fields": {field_id: field_value}}
+                # Custom fields need ADF format in Jira Cloud
+                payload = {"fields": {field_id: self._text_to_adf(field_value)}}
             else:
                 payload = {"fields": {field_id: self._markdown_to_adf(field_value)}}
             
             response = requests.put(url, json=payload, auth=auth,
                 headers={"Accept": "application/json", "Content-Type": "application/json"})
-            return response.status_code == 204
-        except:
+            if response.status_code == 204:
+                return True
+            print(f"   ❌ Update failed: {response.status_code} - {response.text[:200]}")
+            return False
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            return False
+
+    def _text_to_adf(self, text: str) -> Dict:
+        """Convert plain text to ADF format for custom fields"""
+        content = []
+        for line in text.split("\n"):
+            content.append({"type": "paragraph", "content": [{"type": "text", "text": line}] if line.strip() else []})
+        return {"type": "doc", "version": 1, "content": content}
+
+    def _create_adf_table(self, headers: List[str], rows: List[List[str]]) -> Dict:
+        """Create ADF table for Jira comments"""
+        def cell(text, is_header=False):
+            return {"type": "tableHeader" if is_header else "tableCell",
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(text)}]}]}
+        table_rows = [{"type": "tableRow", "content": [cell(h, True) for h in headers]}]
+        for row in rows:
+            table_rows.append({"type": "tableRow", "content": [cell(c) for c in row]})
+        return {"type": "table", "content": table_rows}
+
+    def add_comment_with_table(self, issue_id: str, title: str, headers: List[str], rows: List[List[str]]) -> bool:
+        """Add comment with properly formatted ADF table"""
+        if not self.use_direct_api:
+            return False
+        try:
+            url = f"{self.jira_base_url}/rest/api/3/issue/{issue_id}/comment"
+            auth = HTTPBasicAuth(self.jira_username, self.jira_api_token)
+            content = [
+                {"type": "paragraph", "content": [{"type": "text", "text": title, "marks": [{"type": "strong"}]}]},
+                self._create_adf_table(headers, rows)
+            ]
+            payload = {"body": {"type": "doc", "version": 1, "content": content}}
+            response = requests.post(url, json=payload, auth=auth,
+                headers={"Accept": "application/json", "Content-Type": "application/json"})
+            return response.status_code in [200, 201]
+        except Exception as e:
+            print(f"   ❌ Comment error: {e}")
             return False
 
     def assign_issue(self, issue_id: str, assignee: str) -> bool:
@@ -496,16 +539,42 @@ class JiraAnalysisAgent:
 
     def update_jira_with_analysis(self, result: AnalysisResult, assign_to: Optional[str] = None, **kwargs) -> bool:
         try:
+            # 1. Update Pseudo Code field
+            print(f"📝 Updating Pseudo Code field...")
             pseudo_text = f"🔍 Pseudo Code ({result.pseudo_code.complexity.value})\n\n{result.pseudo_code.sections[0]['steps']}"
-            self.jira_client.update_issue_field(result.issue.issue_id, self.config.pseudo_code_field, pseudo_text)
+            if self.jira_client.update_issue_field(result.issue.issue_id, self.config.pseudo_code_field, pseudo_text):
+                print(f"✅ Pseudo Code updated")
+            else:
+                print(f"⚠️ Pseudo Code update failed")
             
-            effort_text = "📊 Effort Estimation\n\n| Task | Hours | Days |\n|------|-------|------|\n" + \
-                "\n".join([f"| {t.task_name} | {t.estimated_hours} | {t.estimated_days:.2f} |" for t in result.effort_estimate.tasks]) + \
-                f"\n| **Total** | {result.effort_estimate.total_hours} | {result.effort_estimate.total_days:.2f} |"
-            self.jira_client.add_comment(result.issue.issue_id, effort_text, **kwargs)
+            # 2. Update Source Code field
+            if self.config.source_code_field:
+                print(f"📝 Updating Source Code field...")
+                source_text = f"💻 Source Code ({result.source_code.language.upper()})\n\n"
+                for f in result.source_code.files:
+                    source_text += f"// === {f['filename']} ===\n{f['code']}\n\n"
+                if self.jira_client.update_issue_field(result.issue.issue_id, self.config.source_code_field, source_text):
+                    print(f"✅ Source Code updated")
+                else:
+                    print(f"⚠️ Source Code update failed")
             
+            # 3. Add effort estimation as ADF table comment
+            print(f"📊 Adding effort estimation comment...")
+            headers = ["Task", "Hours", "Days"]
+            rows = [[t.task_name, str(t.estimated_hours), f"{t.estimated_days:.2f}"] for t in result.effort_estimate.tasks]
+            rows.append(["TOTAL", str(result.effort_estimate.total_hours), f"{result.effort_estimate.total_days:.2f}"])
+            rows.append([f"With Buffer ({int(result.effort_estimate.buffer_percentage)}%)",
+                        f"{result.effort_estimate.total_hours * 1.2:.2f}",
+                        f"{result.effort_estimate.total_with_buffer:.2f}"])
+            if self.jira_client.add_comment_with_table(result.issue.issue_id, "📊 Effort Estimation", headers, rows):
+                print(f"✅ Effort table added")
+            else:
+                print(f"⚠️ Effort comment failed")
+            
+            # 4. Assign if requested
             if assign_to:
-                self.jira_client.assign_issue(result.issue.issue_id, assign_to)
+                if self.jira_client.assign_issue(result.issue.issue_id, assign_to):
+                    print(f"✅ Assigned to {assign_to}")
             
             print(f"✅ Jira updated: {result.issue.issue_id}")
             return True
